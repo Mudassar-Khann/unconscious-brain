@@ -85,6 +85,22 @@ def delete_idea(idea_id: str):
     save_ideas(updated_ideas)
     return {"message": "Idea deleted successfully.", "id": idea_id}
 
+@app.put("/api/ideas/{idea_id}", response_model=IdeaResponse)
+def update_idea(idea_id: str, payload: IdeaCreate):
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Content cannot be empty.")
+    
+    ideas = load_ideas()
+    for idea in ideas:
+        if idea.get("id") == idea_id:
+            idea["content"] = content
+            idea["tags"] = extract_tags(content)
+            save_ideas(ideas)
+            return idea
+            
+    raise HTTPException(status_code=404, detail="Idea not found.")
+
 # Serve the HTML frontend at root
 @app.get("/", response_class=HTMLResponse)
 def read_root():

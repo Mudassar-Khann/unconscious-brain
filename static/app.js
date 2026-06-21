@@ -19,6 +19,10 @@ let state = {
     searchQuery: ""
 };
 
+// Modals State
+let ideaToDeleteId = null;
+let ideaToEditId = null;
+
 // Toast Notification Helper
 function showToast(message) {
     const toast = document.getElementById("toast");
@@ -96,6 +100,130 @@ function cyclePrompt() {
     document.getElementById("creativePromptText").textContent = nextPrompt;
 }
 
+// Auto-expanding textarea utility
+function makeAutoExpanding(textarea) {
+    const adjust = () => {
+        textarea.style.height = 'auto';
+        textarea.style.height = textarea.scrollHeight + 'px';
+    };
+    textarea.addEventListener('input', adjust);
+    // Initial adjust on load/content set
+    adjust();
+}
+
+// Recent tags calculation for autocomplete suggestions
+function getRecentTags() {
+    const tagsMap = {};
+    state.ideas.forEach(idea => {
+        idea.tags.forEach(tag => {
+            tagsMap[tag] = (tagsMap[tag] || 0) + 1;
+        });
+    });
+    // Return tags sorted by frequency
+    return Object.keys(tagsMap).sort((a, b) => tagsMap[b] - tagsMap[a]);
+}
+
+// Autocomplete suggestions box handler
+function setupTagHelper(textarea, helperDiv, containerDiv) {
+    const updateSuggestions = () => {
+        const text = textarea.value;
+        const cursorPos = textarea.selectionStart;
+        
+        // Find if we are currently typing a word starting with #
+        const textBeforeCursor = text.slice(0, cursorPos);
+        const words = textBeforeCursor.split(/[\s\n]+/);
+        const lastWord = words[words.length - 1];
+        
+        if (lastWord.startsWith('#')) {
+            const partialTag = lastWord.slice(1).toLowerCase();
+            const allRecentTags = getRecentTags();
+            const matchedTags = allRecentTags.filter(tag => tag.startsWith(partialTag)).slice(0, 5);
+            
+            if (matchedTags.length > 0) {
+                helperDiv.style.display = 'flex';
+                containerDiv.innerHTML = matchedTags.map(tag => `
+                    <span class="tag-helper-item" data-tag="${tag}">#${tag}</span>
+                `).join('');
+                
+                // Add click listener for autocomplete selection
+                containerDiv.querySelectorAll('.tag-helper-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        const clickedTag = item.getAttribute('data-tag');
+                        const startPos = cursorPos - lastWord.length;
+                        const textAfterCursor = text.slice(cursorPos);
+                        
+                        // Insert clicked tag
+                        textarea.value = text.slice(0, startPos) + '#' + clickedTag + ' ' + textAfterCursor;
+                        textarea.focus();
+                        
+                        // Set cursor position after the autocomplete tag and space
+                        const newCursorPos = startPos + clickedTag.length + 2;
+                        textarea.setSelectionRange(newCursorPos, newCursorPos);
+                        
+                        helperDiv.style.display = 'none';
+                        // Re-trigger expansion adjust
+                        textarea.style.height = 'auto';
+                        textarea.style.height = textarea.scrollHeight + 'px';
+                    });
+                });
+            } else {
+                helperDiv.style.display = 'none';
+            }
+        } else {
+            helperDiv.style.display = 'none';
+        }
+    };
+    
+    textarea.addEventListener('input', updateSuggestions);
+    textarea.addEventListener('keyup', (e) => {
+        // Close on escape
+        if (e.key === 'Escape') {
+            helperDiv.style.display = 'none';
+        }
+    });
+}
+
+// Custom Modals Handling
+function openDeleteModal(id) {
+    ideaToDeleteId = id;
+    const idea = state.ideas.find(i => i.id === id);
+    if (!idea) return;
+    
+    // Set preview text
+    document.getElementById("deleteCardPreview").textContent = idea.content.length > 180 
+        ? idea.content.slice(0, 180) + "..." 
+        : idea.content;
+    
+    document.getElementById("deleteModal").classList.add("show");
+}
+
+function closeDeleteModal() {
+    document.getElementById("deleteModal").classList.remove("show");
+    ideaToDeleteId = null;
+}
+
+function openEditModal(id) {
+    ideaToEditId = id;
+    const idea = state.ideas.find(i => i.id === id);
+    if (!idea) return;
+    
+    const editInput = document.getElementById("editInput");
+    editInput.value = idea.content;
+    
+    document.getElementById("editModal").classList.add("show");
+    
+    // Recalculate height and focus
+    editInput.focus();
+    editInput.style.height = 'auto';
+    editInput.style.height = editInput.scrollHeight + 'px';
+}
+
+function closeEditModal() {
+    document.getElementById("editModal").classList.remove("show");
+    document.getElementById("editTagHelper").style.display = "none";
+    ideaToEditId = null;
+}
+
 // API: Fetch ideas
 async function fetchIdeas() {
     try {
@@ -115,6 +243,13 @@ async function captureIdea() {
     const content = input.value.trim();
     if (!content) return;
     
+    const btn = document.getElementById("btnCapture");
+    
+    // Disable inputs (Network request latency UX)
+    input.disabled = true;
+    btn.disabled = true;
+    btn.classList.add("loading");
+    
     try {
         const response = await fetch("/api/ideas", {
             method: "POST",
@@ -127,26 +262,69 @@ async function captureIdea() {
         if (!response.ok) throw new Error("Failed to capture idea.");
         
         input.value = "";
+        input.style.height = 'auto'; // Reset size
         showToast("Spark captured successfully.");
         await fetchIdeas();
     } catch (error) {
         console.error(error);
         showToast("Failed to save spark.");
+    } finally {
+        // Re-enable inputs
+        input.disabled = false;
+        btn.disabled = false;
+        btn.classList.remove("loading");
+        input.focus();
+    }
+}
+
+// API: Save edited idea
+async function saveEditedIdea() {
+    if (!ideaToEditId) return;
+    const editInput = document.getElementById("editInput");
+    const content = editInput.value.trim();
+    if (!content) return;
+    
+    const saveBtn = document.getElementById("btnSaveEdit");
+    const originalText = saveBtn.textContent;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "SAVING...";
+    
+    try {
+        const response = await fetch(`/api/ideas/${ideaToEditId}`, {
+            method: "PUT",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ content: content })
+        });
+        
+        if (!response.ok) throw new Error("Failed to save changes.");
+        
+        showToast("Spark updated successfully.");
+        closeEditModal();
+        await fetchIdeas();
+    } catch (error) {
+        console.error(error);
+        showToast("Could not update spark.");
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalText;
     }
 }
 
 // API: Delete idea
-async function deleteIdea(id) {
-    if (!confirm("De-orbit this idea spark? This action is permanent.")) return;
+async function confirmDeleteIdea() {
+    if (!ideaToDeleteId) return;
     
     try {
-        const response = await fetch(`/api/ideas/${id}`, {
+        const response = await fetch(`/api/ideas/${ideaToDeleteId}`, {
             method: "DELETE"
         });
         
         if (!response.ok) throw new Error("Failed to delete idea.");
         
         showToast("Spark de-orbited.");
+        closeDeleteModal();
         await fetchIdeas();
     } catch (error) {
         console.error(error);
@@ -154,9 +332,52 @@ async function deleteIdea(id) {
     }
 }
 
+// Data Export: Download database as JSON backup
+function exportBackupJson() {
+    if (state.ideas.length === 0) {
+        showToast("Archive is empty. Nothing to export.");
+        return;
+    }
+    const jsonString = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state.ideas, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", jsonString);
+    downloadAnchor.setAttribute("download", `neural_brain_backup_${new Date().toISOString().split('T')[0]}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    showToast("JSON database backup downloaded.");
+}
+
+// Data Export: Download database as Markdown archive index
+function exportBackupMarkdown() {
+    if (state.ideas.length === 0) {
+        showToast("Archive is empty. Nothing to export.");
+        return;
+    }
+    let mdContent = `# Neural Archive Index - Exported ${new Date().toLocaleDateString()}\n\n`;
+    state.ideas.forEach(idea => {
+        const formattedTime = new Date(idea.created_at).toLocaleString();
+        const tagsList = idea.tags.map(t => `#${t}`).join(' ');
+        mdContent += `## Spark ${idea.id.slice(0, 8)} - ${formattedTime}\n`;
+        mdContent += `${idea.content}\n\n`;
+        if (tagsList) {
+            mdContent += `*Tags: ${tagsList}*\n\n`;
+        }
+        mdContent += `---\n\n`;
+    });
+    
+    const mdString = "data:text/markdown;charset=utf-8," + encodeURIComponent(mdContent);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", mdString);
+    downloadAnchor.setAttribute("download", `neural_brain_archive_${new Date().toISOString().split('T')[0]}.md`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    showToast("Markdown archive index downloaded.");
+}
+
 // Copy raw text of idea to clipboard
 function copyToClipboard(content) {
-    // Strip hashtags when copying if desired, or copy exact markdown
     navigator.clipboard.writeText(content).then(() => {
         showToast("Markdown copied to clipboard.");
     }).catch(err => {
@@ -242,13 +463,29 @@ function render() {
     
     // 4. RENDER GRID CARDS
     if (filteredIdeas.length === 0) {
+        let actionHtml = '';
+        if (state.searchQuery || state.activeFilterTag) {
+            actionHtml = `<button class="empty-search-recovery-btn" id="btnResetFilters">Clear Search & Filters</button>`;
+        }
         ideasGrid.innerHTML = `
             <div class="empty-state">
                 <i data-lucide="brain-circuit" class="empty-icon"></i>
                 <h3>No matching sparks found.</h3>
                 <p>Try refining your search terms or selecting a different tag.</p>
+                ${actionHtml}
             </div>
         `;
+        
+        if (state.searchQuery || state.activeFilterTag) {
+            document.getElementById("btnResetFilters").addEventListener("click", () => {
+                state.searchQuery = "";
+                state.activeFilterTag = null;
+                document.getElementById("searchInput").value = "";
+                document.getElementById("btnClearSearch").style.display = "none";
+                document.getElementById("filterStatus").style.display = "none";
+                render();
+            });
+        }
     } else {
         ideasGrid.innerHTML = filteredIdeas.map(idea => {
             const parsedMarkdown = marked.parse(idea.content);
@@ -267,6 +504,9 @@ function render() {
                         <div class="card-meta">
                             <span class="card-time">${formattedTime}</span>
                             <div class="card-actions">
+                                <button class="action-btn edit-btn" title="Edit Idea">
+                                    <i data-lucide="edit-3"></i>
+                                </button>
                                 <button class="action-btn copy-btn" title="Copy Raw Markdown">
                                     <i data-lucide="copy"></i>
                                 </button>
@@ -285,10 +525,16 @@ function render() {
             const id = card.getAttribute("data-id");
             const idea = state.ideas.find(i => i.id === id);
             
+            // Edit button
+            card.querySelector(".edit-btn").addEventListener("click", (e) => {
+                e.stopPropagation();
+                openEditModal(id);
+            });
+            
             // Delete button
             card.querySelector(".delete-btn").addEventListener("click", (e) => {
                 e.stopPropagation();
-                deleteIdea(id);
+                openDeleteModal(id);
             });
             
             // Copy button
@@ -345,22 +591,74 @@ function updateClock() {
 
 // Initializations
 document.addEventListener("DOMContentLoaded", () => {
-    // 1. Theme Preference Setup
-    const vibeSelect = document.getElementById("vibeSelect");
+    // 1. Theme Switches Setup
+    const themeSwitches = document.getElementById("themeSwitches");
     const savedTheme = localStorage.getItem("neural_vibe") || "theme-obsidian";
     document.body.className = savedTheme;
-    vibeSelect.value = savedTheme;
     
-    vibeSelect.addEventListener("change", (e) => {
-        const theme = e.target.value;
-        document.body.className = theme;
-        localStorage.setItem("neural_vibe", theme);
+    // Set active theme button
+    themeSwitches.querySelectorAll(".theme-btn").forEach(btn => {
+        if (btn.getAttribute("data-theme") === savedTheme) {
+            btn.classList.add("active");
+        } else {
+            btn.classList.remove("active");
+        }
+        
+        btn.addEventListener("click", () => {
+            themeSwitches.querySelectorAll(".theme-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            const theme = btn.getAttribute("data-theme");
+            document.body.className = theme;
+            localStorage.setItem("neural_vibe", theme);
+            showToast(`VIBE SWAPPED: ${theme.replace("theme-", "").toUpperCase()}`);
+        });
     });
     
-    // 2. Submit capture hooks
+    // 2. Textareas Auto-expansion and focus on load
     const ideaInput = document.getElementById("ideaInput");
-    const captureBtn = document.getElementById("btnCapture");
+    const editInput = document.getElementById("editInput");
     
+    makeAutoExpanding(ideaInput);
+    makeAutoExpanding(editInput);
+    
+    // Auto-focus main input on page load (Ease of Use)
+    ideaInput.focus();
+    
+    // 3. Autocomplete Suggested Tags Box
+    setupTagHelper(ideaInput, document.getElementById("tagHelper"), document.getElementById("suggestedTagsContainer"));
+    setupTagHelper(editInput, document.getElementById("editTagHelper"), document.getElementById("editSuggestedTagsContainer"));
+    
+    // 4. Modal event listeners
+    // Cancel buttons
+    document.getElementById("btnCancelDelete").addEventListener("click", closeDeleteModal);
+    document.getElementById("btnConfirmCancelDelete").addEventListener("click", closeDeleteModal);
+    document.getElementById("btnCancelEdit").addEventListener("click", closeEditModal);
+    document.getElementById("btnConfirmCancelEdit").addEventListener("click", closeEditModal);
+    
+    // Action confirmations
+    document.getElementById("btnConfirmDelete").addEventListener("click", confirmDeleteIdea);
+    document.getElementById("btnSaveEdit").addEventListener("click", saveEditedIdea);
+    
+    // Close modal on background overlay click
+    document.querySelectorAll(".modal-overlay").forEach(overlay => {
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) {
+                closeDeleteModal();
+                closeEditModal();
+            }
+        });
+    });
+    
+    // Modal hotkey Escape listener
+    window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            closeDeleteModal();
+            closeEditModal();
+        }
+    });
+    
+    // 5. Submit capture hooks
+    const captureBtn = document.getElementById("btnCapture");
     captureBtn.addEventListener("click", captureIdea);
     
     // Command shortcut: Ctrl + Enter
@@ -371,7 +669,14 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
     
-    // 3. Search & filter hooks
+    editInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && e.ctrlKey) {
+            e.preventDefault();
+            saveEditedIdea();
+        }
+    });
+    
+    // 6. Search & filter hooks
     const searchInput = document.getElementById("searchInput");
     const clearSearch = document.getElementById("btnClearSearch");
     
@@ -394,20 +699,25 @@ document.addEventListener("DOMContentLoaded", () => {
         render();
     });
     
-    // 4. Creative Prompt Generator hooks
+    // 7. Data export buttons hooks
+    document.getElementById("btnExportJson").addEventListener("click", exportBackupJson);
+    document.getElementById("btnExportMarkdown").addEventListener("click", exportBackupMarkdown);
+    
+    // 8. Creative Prompt Generator hooks
     cyclePrompt();
     document.getElementById("btnRefreshSpark").addEventListener("click", cyclePrompt);
     
     document.getElementById("btnUseSpark").addEventListener("click", () => {
         const text = document.getElementById("creativePromptText").textContent;
-        // Append spark text template into capture box
         ideaInput.value = `> Prompt Spark: ${text}\n\n`;
         ideaInput.focus();
-        // Position cursor at end
+        // Position cursor at end and trigger height adjust
         ideaInput.selectionStart = ideaInput.selectionEnd = ideaInput.value.length;
+        ideaInput.style.height = 'auto';
+        ideaInput.style.height = ideaInput.scrollHeight + 'px';
     });
     
-    // 5. Initialize Clock & Fetch data
+    // 9. Initialize Clock & Fetch data
     setInterval(updateClock, 1000);
     updateClock();
     fetchIdeas();
